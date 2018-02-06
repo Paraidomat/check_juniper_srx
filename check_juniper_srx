@@ -1,0 +1,866 @@
+#!/usr/bin/python3
+# -*- coding: UTF-8 -*-
+"""
+This module has been coded by Paraidomat.
+
+This module is used to get information on Juniper SRX Firewalls.
+
+The return value is based on the Nagios-Plugin coding-conventions.
+https://nagios-plugins.org/doc/guidelines.html
+"""
+
+import sys
+import getopt
+import ipaddress
+from pysnmp.hlapi import *
+from pysnmp.entity.rfc3413.oneliner import cmdgen
+
+# OID definitions:
+JUNIPER_SRX_OID_D = {
+    "sysDescOid": {
+        "oid": "1.3.6.1.2.1.1.1.0",
+        "description": "System Description"
+    },
+    "MaxCPSession": {
+        "oid": "1.3.6.1.4.1.2636.3.39.1.12.1.1.1.9",
+        "description": "Maximum CP Session availability",
+        "cli": "show security flow cp-session summary",
+        "warning": 0,
+        "critical": 0,
+        "actions": "foo"
+    },
+    "CurrentCPSession": {
+        "oid": "1.3.6.1.4.1.2636.3.39.1.12.1.1.1.8",
+        "description": "Current CP Session count",
+        "cli": "show security flow cp-session summary",
+        "warning": 80,
+        "critical": 90,
+        "actions": "Review traffic patterns, Review sessions numbers on PFE, "
+                   "Review SRX Device type for capacity needs"
+    },
+    "MaxFlowSession": {
+        "oid": "1.3.6.1.4.1.2636.3.39.1.12.1.1.1.7",
+        "description": "Maximum session availability per PFE",
+        "cli": "show security flow session summary",
+        "warning": 0,
+        "critical": 0,
+        "actions": "foo"
+    },
+    "CurrentFlowSessions": {
+        "oid": "1.3.6.1.4.1.2636.3.39.1.12.1.1.1.6",
+        "description": "Current PFE Session Count",
+        "cli": "show security flow session summary",
+        "warning": 80,
+        "critical": 90,
+        "actions": "Review traffic patterns, "
+                   "Look for sessions with high inacticity timeouts, "
+                   "Review Device type"
+    },
+    "jnxOperatingCPU": {
+        "oid": "1.3.6.1.4.1.2636.3.1.13.1.8.9",
+        "description": "CPU usage of Routing Engine",
+        "cli": "show chassis routing-engine",
+        "warning": 85,
+        "critical": 95,
+        "actions": "Disable traceoptions, Clean up storage, "
+                   "Verify system processes"
+    },
+    "CPUUsage": {
+        "oid": "1.3.6.1.4.1.2636.3.39.1.12.1.1.1.4",
+        "description": "CPU Usage of Packet Forwarding Engine",
+        "cli": "show security monitoring fpc X",
+        "warning": 85,
+        "critical": 95,
+        "actions": "Review Traffic pattern, Review PPS, Review Session counts"
+    },
+    "jnxOperatingBuffer": {
+        "oid": "1.3.6.1.4.1.2636.3.1.13.1.11.9",
+        "description": "Used memory percentage for Routing Engine",
+        "cli": "show chassis routing-engine",
+        "warning": 80,
+        "critical": 95,
+        "actions": "Verify routing table size, "
+                   "verify system processes in use, review system logs"
+    },
+    "MemoryUsage": {
+        "oid": "1.3.6.1.4.1.2636.3.39.1.12.1.1.1.5",
+        "description": "Packet Forwarding Memory Usage",
+        "cli": "show security monitoring fpc X",
+        "warning": 80,
+        "critical": 95,
+        "actions": "Review system logs, "
+                   "verify configuration for unused features that can be "
+                   "removed, disable non needed ALGs"
+    },
+    "jnxOperatingTemp": {
+        "oid": "1.3.6.1.4.1.2636.3.1.13.1.7",
+        "description": "Temperature of device and modules",
+        "cli": "show chassis environment / "
+               "show chassis temperature-thresholds",
+        "warning": 75,
+        "critical": 90,
+        "actions": "Check fans, Check ambient temperature"
+    }
+}
+IF_MIB_D = {
+    "ifDescr": {
+        "oid": "1.3.6.1.2.1.2.2.1.2",
+        "description": "Returns a list of all known interfaces"
+    },
+    "ifType": {
+        "oid": "1.3.6.1.2.1.2.2.1.3",
+        "description": "Returns a list of the interface Type"
+    },
+    "ifMtu": {
+        "oid": "1.3.6.1.2.1.2.2.1.4",
+        "description": "Returns a list of the Interface MTUs"
+    },
+    "ifSpeed": {
+        "oid": "1.3.6.1.2.1.2.2.1.5",
+        "description": "Returns a list of interface Speed"
+    },
+    "ifPhysAddress": {
+        "oid": "1.3.6.1.2.1.2.2.1.6",
+        "description": "Returns a list of interface Speed"
+    },
+    "ifAdminStatus": {
+        "oid": "1.3.6.1.2.1.2.2.1.7",
+        "description": "Returns a list of interface admin status"
+    },
+    "ifOperStatus": {
+        "oid": "1.3.6.1.2.1.2.2.1.8",
+        "description": "Returns a list of interface operational status"
+    },
+    "ifInDiscards": {
+        "oid": "1.3.6.1.2.1.2.2.1.13",
+        "description": "Input Discards"
+    },
+    "ifInErrors": {
+        "oid": "1.3.6.1.2.1.2.2.1.14",
+        "description": "Input Errors"
+    },
+    "ifOutDiscards": {
+        "oid": "1.3.6.1.2.1.2.2.1.15",
+        "description": "Output Discards"
+    },
+    "ifOutErrors": {
+        "oid": "1.3.6.1.2.1.2.2.1.20",
+        "description": "Output Errors"
+    },
+    "ifOutQLen": {
+        "oid": "1.3.6.1.2.1.2.2.1.21",
+        "description": "Output queue"
+    },
+}
+
+# Global variables
+IP_ADDRESS_S = None
+COMMUNITY_STRING_S = None
+INTERFACE_NAME_S = None
+MODE_L = ["cp_sessions", "flow_sessions", "cpu_load_re",
+          "cpu_load_fpc", "memory_fpc", "memory_re",
+          "temperature", "interface_status", "interface_status_detail",
+          "interface_list"]
+
+
+def ok(message_s=None, performance_data=None):
+    """Automatically generates the "OK" message with return value 0
+
+    :param message_s: The message that should be printed with the "OK" message
+    :param performance_data: The performance_data string.
+    :return: 0
+    """
+    if not message_s:
+        print("OK - everything is fine! | %s" % performance_data)
+    else:
+        print("OK - %s | %s" % (message_s, performance_data))
+    return 0
+
+
+def warning(message_s=None, performance_data=None):
+    """Automatically generates the "WARNING" message with return value 1
+
+    :param message_s: The message that should be printed with the "WARNING"
+                      message
+    :param performance_data: The performance_data string.
+    :return: 1
+    """
+    if not message_s:
+        print("WARNING - something is wrong! | %s" % performance_data)
+    else:
+        print("WARNING - %s | %s" % (message_s, performance_data))
+    return 1
+
+
+def critical(message_s=None, performance_data=None):
+    """Automatically generates the "CRITICAL" message with return value 2
+
+    :param message_s: The message that should be printed with the "CRITICAL"
+                      message
+    :param performance_data: The performance_data string.
+    :return: 2
+    """
+    if not message_s:
+        print("CRITICAL - something is wrong! | %s" % performance_data)
+    else:
+        print("CRITICAL - %s | %s" % (message_s, performance_data))
+    return 2
+
+
+def unknown(message_s=None):
+    """Automatically generates the "UNKNOWN" message with return value 3
+
+    :param message_s: The message that should be printed with the "UNKNOWN"
+                      message
+    :return: 3
+    """
+    if not message_s:
+        print ("UNKOWN - something went wrong!")
+    else:
+        print ("UNKOWN - %s" % message_s)
+    return 3
+
+
+def error(err=None):
+    """ Automatically generates an Error-Message
+
+    :param err: The Errormessage
+    :return: nothing
+    """
+    if err:
+        print(err)
+    print("check_juniper_srx -i <ipAddress> -c <communityString> "
+          "-m <mode> [-n <interface-name>]")
+    print('available modes: ', MODE_L)
+
+
+def generate_performance_data(label="", value="", uom="", warning="",
+                              critical="", minimum="", maximum=""):
+    """ Automatically generate performance data string
+
+    This function automatically generates the performance-data string which is
+    defined by the Nagios-Plugin development guidelines. If a parameter is
+    omitted it will simply be empty.
+
+    All Parameters will be convertet to strings automatically.
+    The following format is used for the performance data:
+        [label]=[value][uom];[WARN];[CRIT];[MIN];[MAX]
+    For example:
+        cpu_percentage=10%;80;90;0;100
+    UOM stands for unit of measurement
+
+    :param label: The label used for the performance data
+    :param value: The acutal current value
+    :param uom: The unit of measurement
+    :param warning: The threshold value for warning
+    :param critical: The threshold value for critical
+    :param minimum: The lowest possible value
+    :param maximum: The highest possible value
+    :return: The performance data string
+    """
+
+    return "%s=%s%s;%s;%s;%s;%s" % (
+        str(label), str(value), str(uom), str(warning),
+        str(critical), str(minimum), str(maximum))
+
+
+def cp_sessions():
+    """ Determine usage of CP-Sessions
+
+    This function is used to determine the usage of the
+    central point sessions (cp-sessions) on the firewall.
+    The amount of current cp-sessions is compared to the maximum cp-sessions.
+    The JuniperSrxOids_d dictionary stores the warning and critical thresholds.
+    :return: An Integer from range(0,4) depending on threshold.
+    """
+    current_sessions = 0
+    max_sessions_table = snmp_get(
+        JUNIPER_SRX_OID_D["MaxCPSession"]["oid"])
+
+    try:
+        max_sessions = max_sessions_table[0][0][1]
+    except IndexError:
+        return unknown("Could not get max_sessions")
+
+    current_sessions_table = snmp_get(
+        JUNIPER_SRX_OID_D["CurrentCPSession"]["oid"])
+
+    try:
+        current_sessions_row = current_sessions_table[0]
+        for name, val in current_sessions_row:
+            current_sessions += val
+    except IndexError:
+        return unknown("Could not get current_sessions")
+
+    warning_threshold = \
+        int(JUNIPER_SRX_OID_D["CurrentCPSession"]["warning"])
+
+    critical_threshold = \
+        int(JUNIPER_SRX_OID_D["CurrentCPSession"]["critical"])
+
+    performance_data_s = generate_performance_data(
+        label="cp_sessions",
+        value=current_sessions,
+        warning=str(max_sessions * (warning_threshold / 100)),
+        critical=str(max_sessions * (critical_threshold / 100)),
+        minimum=str(0),
+        maximum=str(max_sessions))
+
+    try:
+        percentage = current_sessions / max_sessions
+    except ZeroDivisionError:
+        percentage = 0
+
+    if percentage < JUNIPER_SRX_OID_D["CurrentCPSession"]["warning"]:
+        return ok("current CP_sessions: %s | %s" % (
+            current_sessions,
+            performance_data_s))
+    elif percentage < JUNIPER_SRX_OID_D["CurrentCPSession"]["critical"]:
+        cli = JUNIPER_SRX_OID_D["CurrentCPSession"]["cli"]
+        actions = JUNIPER_SRX_OID_D["CurrentCPSession"]["actions"]
+        return warning(
+            "current CP_Sessions: %s. "
+            "Verify using %s Try the following: %s | %s" % (
+                current_sessions,
+                cli,
+                actions,
+                performance_data_s))
+    else:
+        return critical("current CP_sessions: %s | %s" % (
+            current_sessions,
+            performance_data_s))
+
+
+def cpu_load_fpc():
+    """ Determine load of firewalls' fpc.
+
+    This function is used to read the load from the fpc of the firewall and
+    :return: An Integer from range(0,4) depending on threshold.
+    """
+    cpu_load_table = snmp_get(
+        JUNIPER_SRX_OID_D["CPUUsage"]["oid"])
+
+    if cpu_load_table == -1:
+        return unknown()
+
+    performance_data_s = ""
+    cpu_load_d = {}
+    warning_i = JUNIPER_SRX_OID_D["CPUUsage"]["warning"]
+    critical_i = JUNIPER_SRX_OID_D["CPUUsage"]["critical"]
+
+    for varBindTableRow in cpu_load_table:
+        for name, val in varBindTableRow:
+            node_number = str(name).split('.')[15]
+            cpu_load_d[node_number] = val
+            performance_data_s += generate_performance_data(
+                label="FPC_" + node_number + "_cpu_load",
+                value=val,
+                warning=warning_i,
+                critical=critical_i
+            )
+
+    if all(value < warning_i for value in cpu_load_d.values()):
+            # if all values are below the warning threshold
+        return ok("CPU loads: %s" % cpu_load_d.values(), performance_data_s)
+    elif all(value < critical_i for value in cpu_load_d.values()):
+            # if all values are below critical threshold
+        message = "CPU loads %s Verify: %s Actions: %s" % (
+            cpu_load_d.values(),
+            JUNIPER_SRX_OID_D["CPUUsage"]["cli"],
+            JUNIPER_SRX_OID_D["CPUUsage"]["actions"])
+        return warning(message, performance_data_s)
+    elif any(value > critical_i for value in cpu_load_d.values()):
+            # If any values is greater than critical threshold
+        message = "CPU loads %s Verify: %s Actions: %s" % (
+            cpu_load_d.values(),
+            JUNIPER_SRX_OID_D["CPUUsage"]["cli"],
+            JUNIPER_SRX_OID_D["CPUUsage"]["actions"])
+        return critical(message, performance_data_s)
+    else:
+        return unknown()
+
+
+def cpu_load_re():
+    """ Determine load of firewall's routing engine
+
+    This function is used to determine the load of the firewalls routing engine.
+    Should the load be above the defined warning or critical thresholds an
+    according output wil be printed and value will be returned.
+
+    :return: A value from range(0,4) depending on the load
+    """
+    cpu_load_table = snmp_get(JUNIPER_SRX_OID_D["jnxOperatingCPU"]["oid"])
+    if cpu_load_table == -1:
+        return unknown()
+
+    perf_data_s = ""
+    cpu_load_d = {}
+    warning_i = JUNIPER_SRX_OID_D["jnxOperatingCPU"]["warning"]
+    critical_i = JUNIPER_SRX_OID_D["jnxOperatingCPU"]["critical"]
+    try:
+        for varBindTableRow in cpu_load_table:
+            for name, val in varBindTableRow:
+                node_number = str(name).split('.')[13]
+                cpu_load_d[node_number] = val
+                perf_data_s += generate_performance_data(
+                    label="snmp_node" + node_number + "_cpu_load",
+                    value=val,
+                    warning=warning_i,
+                    critical=critical_i
+                )
+    except IndexError:
+        return critical("cpu_load_table IndexError")
+
+    if all(value < warning_i for value in cpu_load_d.values()):
+            # If all values are lower than warning threshold:
+        return ok("CPU load is %s" % cpu_load_d, perf_data_s)
+    elif all(value < critical_i for value in cpu_load_d.values()):
+            # If all values are lower than critical threshold:
+        return warning("One or more nodes have a increased CPU load",
+                       perf_data_s)
+    elif any(value > critical_i for value in cpu_load_d.values()):
+            # If any value is above critical threshold:
+        return critical("One or more nodes have a high CPU load",
+                        perf_data_s)
+    else:
+        return unknown()
+
+
+def flow_sessions():
+    """ Analyze the amount of flow sessions
+
+    :return: A value from range(0,4) depending on the flow session count
+    """
+    max_sessions = 0
+    current_sessions = 0
+
+    max_sessions_table = snmp_get(JUNIPER_SRX_OID_D["MaxFlowSession"]["oid"])
+
+    try:
+        for varBindTableRow in max_sessions_table:
+            for name, val in varBindTableRow:
+                if val != 0:
+                    max_sessions = val
+    except IndexError:
+        return unknown("max_sessions could not be retrieved")
+
+    current_sessions_table = snmp_get(JUNIPER_SRX_OID_D["CurrentFlowSessions"]["oid"])
+    try:
+        for varBindTableRow in current_sessions_table:
+            for name, val in varBindTableRow:
+                if val != 0:
+                    current_sessions = current_sessions + val
+    except IndexError:
+        return unknown("current_sessions could not be retrieved")
+
+    warning_i = JUNIPER_SRX_OID_D["CurrentFlowSessions"]["warning"]
+    critical_i = JUNIPER_SRX_OID_D["CurrentFlowSessions"]["critical"]
+    percentage = current_sessions / max_sessions
+
+    perf_data_s = generate_performance_data (
+        label="cp_sessions",
+        value=current_sessions,
+        warning=str(max_sessions * (warning_i / 100)),
+        critical=str(max_sessions * (critical_i / 100)),
+        minimum=str(0),
+        maximum=str(max_sessions))
+
+    if percentage < warning_i:
+        return ok("%s Sessions" % current_sessions, perf_data_s)
+    elif percentage < critical_i:
+        return warning("%s Sessions" % current_sessions, perf_data_s)
+    else:
+        return critical("%s Sessions" % current_sessions, perf_data_s)
+
+
+def interface_list():
+    """ Get an list of all the devices interfaces.
+
+    :return: 0
+    """
+    interfaces_table = snmp_get(IF_MIB_D["ifDescr"]["oid"])
+
+    try:
+        for table_row in interfaces_table:
+            for name, val in table_row:
+                print ("Interface-ID: %s Interface-Name: %s" %
+                       (str(name).split('.')[10], val))
+    except IndexError:
+        return critical("couldn't get interfaces_table")
+
+    return 0
+
+
+def interface_status():
+    """ Get status of an interface
+
+    :return: 0 or 2 depending on interface status
+    """
+    interfaces_table = snmp_get(IF_MIB_D["ifDescr"]["oid"])
+    interface_id_s = "-1"
+    exitstatus_l = [0]
+    crit_info_s = ""
+    if_admin_status = 0
+    if_oper_status = 0
+
+    for interfaces_table_row in interfaces_table:
+        for name, val in interfaces_table_row:
+            if str(val) == str(INTERFACE_NAME_S):
+                interface_id_s = str(name).split('.')[-1:]
+            else:
+                critical("Interface not found, try interface_list")
+
+    print (interfaces_table)
+
+    if interface_id_s != "-1":
+        # Interface-Admin Status
+        # TODO: Why i can't i use the direct OID?
+        if_admin_status_table = snmp_get("%s.%s" %
+                                         (IF_MIB_D["ifAdminStatus"]["oid"],
+                                          interface_id_s))
+        try:
+            if if_admin_status_table[0][1] == 2:
+                exitstatus_l.append(2)
+                crit_info_s = "%s Interface %s is administratively down!" % \
+                             (crit_info_s, INTERFACE_NAME_S)
+        except IndexError:
+            critical("Interface admin status not found, try interface_list")
+
+
+        # Interface-Operational Status
+        # TODO: Why i can't i use the direct OID?
+        if_oper_status_table = snmp_get("%s.%s" % (
+            IF_MIB_D["ifOperStatus"]["oid"],
+            interface_id_s))
+
+        try:
+            if if_oper_status_table[0][1] == 2:
+                exitstatus_l.append(2)
+                crit_info_s = "%s Interface %s is down" % (crit_info_s,
+                                                           INTERFACE_NAME_S)
+            elif if_oper_status_table[0][1] == 7:
+                exitstatus_l.append(2)
+                crit_info_s = "%s Interface %s is LinkLayerDown" % (
+                    crit_info_s,
+                    INTERFACE_NAME_S)
+        except IndexError:
+            critical("Interface oper. status not found, try interface_list")
+
+        performance_data_s = generate_performance_data(
+            label="ifAdminStatus",
+            value=if_admin_status_table[0][1],
+            warning="1",
+            critical="2",
+            maximum="2"
+        )
+        performance_data_s = "%s %s" % (
+            performance_data_s,
+            generate_performance_data(
+                label="ifOperStatus",
+                value=if_oper_status_table[0][1],
+                warning="1",
+                critical="2",
+                maximum="2"))
+        # Return-Data
+        if max(exitstatus_l) == 0:
+            return ok("Everything is fine", performance_data_s)
+        else:
+            critical(crit_info_s, performance_data_s)
+
+
+def interface_status_detail():
+    interfaces_varBindTable = snmp_get(IF_MIB_D["ifDescr"]["oid"])
+    interface_id_s = "-1"
+    exitstatus_l = [0]
+    critinfo_s = ""
+    ifAdminStatus = 0
+    ifOperStatus = 0
+    perfdata_s = ""
+    if interfaces_varBindTable == -1:
+        return unknown("Interface-Name not found!")
+
+    for varBindTableRow in interfaces_varBindTable:
+        for name, val in varBindTableRow:
+            if str(val) == str(INTERFACE_NAME_S):
+                interface_id_s = str(name).split('.')[10]
+
+    if interface_id_s != "-1":
+        # Interface-Admin Status
+        # TODO: Herausfinden, warum ich nicht direkt die OID
+        # mit Interface-ID pollen kann
+        # TODO: Laufzeittechnisch ist das hier nÃÂ¤mlich echt fÃÂ¼r die Tonne.
+        ifAdminStatus_table = snmp_get(IF_MIB_D["ifAdminStatus"]["oid"])
+        for varBindTableRow in ifAdminStatus_table:
+            for name, val in varBindTableRow:
+                if str(name) == "%s.%s" % (IF_MIB_D["ifAdminStatus"]["oid"],
+                                           interface_id_s):
+                    if int(val) == 2:
+                        exitstatus_l.append(2)
+                        critinfo_s = \
+                            "%s Interface %s is administratively down!" % \
+                            (critinfo_s, INTERFACE_NAME_S)
+                        ifAdminStatus = int(val)
+
+        # Interface-Operational Status
+        # TODO: Herausfinden, warum ich nicht direkt die OID
+        # mit Interface-ID pollen kann
+        # TODO: Laufzeittechnisch ist das hier nÃÂ¤mlich echt fÃÂ¼r die Tonne.
+        ifOperStatus_table = snmp_get(IF_MIB_D["ifOperStatus"]["oid"])
+        for varBindTableRow in ifOperStatus_table:
+            for name, val in varBindTableRow:
+                if str(name) == "%s.%s" % (IF_MIB_D["ifOperStatus"]["oid"],
+                                           interface_id_s):
+                    ifOperStatus = int(val)
+                    if int(val) == 2:
+                        exitstatus_l.append(2)
+                        critinfo_s = "%s Interface %s is down!" % \
+                                     (critinfo_s, INTERFACE_NAME_S)
+                    elif int(val) == 7:
+                        exitstatus_l.append(2)
+                        critinfo_s = "%s Interface %s is lowerLayerDown!" % \
+                                     (critinfo_s, INTERFACE_NAME_S)
+
+        try:
+            IF_MIB_D.pop("ifDescr", None)
+            IF_MIB_D.pop("ifAdminStatus", None)
+            IF_MIB_D.pop("ifOperStatus", None)
+            IF_MIB_D.pop("ifType", None)
+        except KeyError:
+            return unknown("something went wrong!")
+
+        for query in IF_MIB_D:
+            query_table = snmp_get(IF_MIB_D[query]["oid"])
+            for varBindTableRow in query_table:
+                for name, val in varBindTableRow:
+                    if str(name) == "%s.%s" % \
+                            (IF_MIB_D[query]["oid"], interface_id_s):
+                        perfdata_s = "%s %s=%s;;;;" % \
+                                     (perfdata_s, query, str(val))
+
+        # Return-Data
+        if max(exitstatus_l) == 0:
+            print ("OK - Everything is fine | "
+                "ifAdminStatus=%s;1;2;;2 ifOperStatus=%s;1;2;;2 %s" %
+                   (ifAdminStatus, ifOperStatus, perfdata_s))
+        else:
+            print ("CRITICAL - %s | "
+                "ifAdminStatus=%s;1;2;;2 ifOperStatus=%s;1;2;;2 %s" %
+                   (critinfo_s, ifAdminStatus, ifOperStatus, perfdata_s))
+        return max(exitstatus_l)
+    else:
+        return unknown("Interface-Name %s not found!" % INTERFACE_NAME_S)
+
+
+def memory_re():
+    oid_current_d=JUNIPER_SRX_OID_D["jnxOperatingBuffer"]
+    memory_var_bind_table = snmp_get(oid_current_d["oid"])
+    if memory_var_bind_table == -1:
+        return unknown()
+
+    perf_data_suffix_s = ""
+    cpu_load_d = {}
+    for var_bind_table_row in memory_var_bind_table:
+        for name, val in var_bind_table_row:
+            node_number = str(name).split('.')[13]
+            cpu_load_d[node_number] = val
+            perf_data_suffix_s = perf_data_suffix_s + "%s=%s;%s;%s;; " % (
+                "snmp_node" + node_number + "_memory_usage",
+                val,
+                oid_current_d["warning"],
+                oid_current_d["critical"]
+            )
+
+    if all(value < oid_current_d["warning"] for value in cpu_load_d.values()):
+        # If all values are below the warning threshold
+        print ("OK - Everything's fine | ", perf_data_suffix_s)
+        return 0
+    elif all(value < oid_current_d["critical"] for value in cpu_load_d.values()):
+        # If all values are below critical threshold
+        print ("WARNING - A node has increased memory usage. Verify: ",
+               oid_current_d["cli"], ". Actions: ",
+               oid_current_d["actions"], " | ", perf_data_suffix_s)
+        return 1
+    elif any(value > oid_current_d["critical"] for value in cpu_load_d.values()):
+        # If any value is above critical threshold
+        print ("CRITICAL - A node has high memory usage. Verify:",
+               oid_current_d["cli"], ". Actions: ",
+               oid_current_d["actions"], " | ", perf_data_suffix_s)
+        return 2
+    else:
+        return unknown()
+
+
+def memory_fpc():
+    oid_current_d = JUNIPER_SRX_OID_D["MemoryUsage"]
+    memory_var_bind_table = snmp_get(oid_current_d["oid"])
+    if memory_var_bind_table == -1:
+        return unknown()
+
+    perf_data_suffix_s = ""
+    cpu_load_d = {}
+    for var_bind_table_row in memory_var_bind_table:
+        for name, val in var_bind_table_row:
+            node_number = str(name).split('.')[15]
+            cpu_load_d[node_number] = val
+            perf_data_suffix_s = perf_data_suffix_s + "%s=%s;%s;%s;; " % (
+                "FPC" + node_number + "_memory_usage",
+                val,
+                oid_current_d["warning"],
+                oid_current_d["critical"]
+            )
+
+    if all(value < oid_current_d["warning"] for value in cpu_load_d.values()):
+        # If all values are below zero:
+        print ("OK - Everything's fine | ", perf_data_suffix_s)
+        return 0
+    elif all(value < oid_current_d["critical"] for value in cpu_load_d.values()):
+        # If all values are below the critical threshold
+        print ("WARNING - A node has increased memory usage. Verify: ",
+               oid_current_d["cli"], ". Actions: ",
+               oid_current_d["actions"], " | ", perf_data_suffix_s)
+        return 1
+    elif any(value > oid_current_d["critical"] for value in cpu_load_d.values()):
+        # If any value is above the critical threshold
+        print ("CRITICAL - A node has high memory usage. Verify:",
+               oid_current_d["cli"], ". Actions: ",
+               oid_current_d["actions"], " | ", perf_data_suffix_s)
+        return 2
+    else:
+        return unknown()
+
+
+def temperature():
+    oid_current_d = JUNIPER_SRX_OID_D["jnxOperatingTemp"]
+    temperature_var_bind_table = snmp_get(IP_ADDRESS_S, COMMUNITY_STRING_S, oid_current_d["oid"])
+    if temperature_var_bind_table == -1:
+        return unknown()
+
+    perf_data_suffix_s = ""
+    temperature_d = {}
+    for varBindTableRow in temperature_var_bind_table:
+        for name, val in varBindTableRow:
+            if val != 0:
+                node_number = str(name).split('.')[13]
+                temperature_d[node_number] = val
+                perf_data_suffix_s = perf_data_suffix_s + "%s=%s;%s;%s;; " % (
+                    "temperature_sensor_" + node_number,
+                    val,
+                    oid_current_d["warning"],
+                    oid_current_d["critical"]
+                )
+
+    if all(value < oid_current_d["warning"] for value in temperature_d.values()):
+        # If all values are below warning threshold
+        print ("OK - Everything's fine | ", perf_data_suffix_s)
+        return 0
+    elif all(value < oid_current_d["critical"] for value in temperature_d.values()):
+        # If all values are below critical threshold
+        print (
+            "WARNING - A sensor reports increased temperature. Verify: ", oid_current_d["cli"], ". Actions: ",
+            oid_current_d["actions"], " | ", perf_data_suffix_s)
+        return 1
+    elif any(value > oid_current_d["critical"] for value in temperature_d.values()):
+        # If any value is above critical threshold
+        print (
+            "CRITICAL - A sensor reports too high temperatures. Verify:", oid_current_d["cli"], ". Actions: ",
+            oid_current_d["actions"], " | ", perf_data_suffix_s)
+        return 2
+    else:
+        return unknown()
+
+
+def snmp_get (oid_s):
+    cmd_gen = cmdgen.CommandGenerator()
+    
+    error_indication, error_status, error_index, var_bind_table = \
+        cmd_gen.nextCmd(cmdgen.CommunityData(COMMUNITY_STRING_S),
+                        cmdgen.UdpTransportTarget((IP_ADDRESS_S, 161)),
+                        oid_s,
+                        lookupNames=True,
+                        lookupValues=True)
+    
+    if error_indication:
+        print(error_indication)
+        return -1
+    elif error_status:
+        print("UNKOWN - %s at %s" % (
+                error_status.prettyPrint(),
+                error_index and var_bind_table[int(error_index)-1][0] or "?"
+            )
+        )
+        return -1
+    else:
+        return var_bind_table
+
+    
+def main (argv):
+    # import global variables
+    global IP_ADDRESS_S
+    global COMMUNITY_STRING_S
+    global INTERFACE_NAME_S
+    mode_s = ""  # Mode-String, damit man weiss, was abgefragt werden soll.
+
+    # Check if parameter count is correct:
+    if len(sys.argv) < 7:
+        err = "Wrong parameter count: " + str(len(sys.argv)) + \
+              "Parameters: " + str(sys.argv)
+        error(err=err)
+        sys.exit(3)
+    
+    # extract parameters:
+    try:
+        # check if arguments are parseable
+        opts, args = getopt.getopt(argv,
+                                   "hi:c:m:n::",
+                                   ["ip_address_s=", "community_string_s=",
+                                    "mode_s=", "interfaceName_s"]
+                                   )
+    except getopt.GetoptError as err:
+        return unknown(error(err))
+        
+    for opt, arg in opts:
+        if opt == "-h":
+            # Operator "-h" wie Hilfe.
+            return unknown(error())
+        elif opt in ("-i", "--ipAddress"):
+            # Operator "-i" wie IP-Adresse
+            try:
+                # Check if IP address is valid.
+                IP_ADDRESS_S = ipaddress.ip_address(arg)
+                IP_ADDRESS_S = arg # save plain IP
+            except ValueError:
+                unknown("%s is not a valid IP-Address" % (arg))
+                sys.exit(3)
+        elif opt in ("-c", "--communityString"):
+            # Operator "-c" wie Community-String
+            COMMUNITY_STRING_S = arg
+        elif opt in ("-m", "--mode"):
+            # Operator "-m" wie Betriebsmodus
+            if arg in MODE_L:
+                mode_s = arg
+        elif opt in ("-n", "--interfaceName"):
+            # Operator "-n" wie Name
+            if opt:
+                INTERFACE_NAME_S = arg
+    
+    # method dispatching
+    dispatch = {
+        "cp_sessions": cp_sessions,
+        "flow_sessions": flow_sessions,
+        "cpu_load_re": cpu_load_re,
+        "cpu_load_fpc": cpu_load_fpc,
+        "memory_fpc": memory_fpc,
+        "memory_re": memory_re,
+        "temperature": temperature,
+        "interface_status": interface_status,
+        "interface_status_detail": interface_status_detail,
+        "interface_list": interface_list
+    }
+    # run dispached function and return integer to system
+    sys.exit(dispatch[mode_s]())
+
+    
+# Aufruf der Main Funktion 
+# calling main function
+if __name__ == "__main__":
+    main(sys.argv[1:])
