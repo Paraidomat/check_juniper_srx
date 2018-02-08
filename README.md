@@ -11,7 +11,6 @@ The script uses the following Python 3 Modules:
 * `sys`
 * `getopt`
 * `ipaddress`
-* `re`
 * `pysnmp`
 
 # Usage
